@@ -70,10 +70,14 @@ public final class ValueSerializer {
             else w.num(n);
         } else if (p instanceof DoubleValue x) {
             prim(w, "double");
-            w.num(x.value());
+            double d = x.value();
+            if (Double.isFinite(d)) w.num(d);
+            else w.str(Double.toString(d)); // "NaN", "Infinity", "-Infinity"
         } else if (p instanceof FloatValue x) {
             prim(w, "float");
-            w.num(Double.parseDouble(Float.toString(x.value())));
+            float fl = x.value();
+            if (Float.isFinite(fl)) w.num(Double.parseDouble(Float.toString(fl)));
+            else w.str(Float.toString(fl));
         } else if (p instanceof BooleanValue x) {
             prim(w, "boolean");
             w.bool(x.value());
@@ -127,48 +131,80 @@ public final class ValueSerializer {
 
     // ---- objects ----
 
+    /** Thrown when an expected JDK-internal field is absent; callers fall back to a plain obj. */
+    private static final class MissingField extends RuntimeException {
+        MissingField(String m) {
+            super(m, null, false, false);
+        }
+    }
+
+    private static final int CHUNK = 256;
+
+    private final java.util.Map<ReferenceType, java.util.Map<String, Field>> fieldsByName =
+            new java.util.HashMap<>();
+    private final java.util.Map<ReferenceType, List<Field>> instanceFields = new java.util.HashMap<>();
+    private boolean sentinelResolved;
+    private ObjectReference emptySentinel;
+
     private void writeObject(Json.Writer w, ObjectReference o, int depth) {
         ReferenceType rt = o.referenceType();
         String cls = rt.name();
 
         Value boxed = unbox(o, cls);
-        if (boxed != null) {
-            writePrimitive(w, (PrimitiveValue) boxed);
+        if (boxed instanceof PrimitiveValue pv) {
+            writePrimitive(w, pv);
             return;
         }
         if (depth > maxDepth) {
             writeRef(w, o);
             return;
         }
+        try {
+            if (!writeKnownCollection(w, o, cls, depth)) writePlainObject(w, o, depth);
+        } catch (MissingField e) {
+            // all reads happen before any output for this value, so falling back is safe
+            writePlainObject(w, o, depth);
+        }
+    }
+
+    /** Returns false if cls is not a recognized collection. */
+    private boolean writeKnownCollection(Json.Writer w, ObjectReference o, String cls, int depth) {
         switch (cls) {
             case "java.util.ArrayList" -> {
-                int size = intField(o, "size");
-                ArrayReference data = arrayField(o, "elementData");
+                Value[] f = get(o, "size", "elementData");
+                int size = asInt(f[0]);
+                ArrayReference data = (ArrayReference) f[1];
                 int n = Math.min(size, maxElems);
                 writeList(w, o, "list", size, data == null || n == 0 ? List.of() : data.getValues(0, n), depth);
             }
             case "java.util.LinkedList" -> {
-                int size = intField(o, "size");
+                Value[] f = get(o, "size", "first");
                 List<Value> items = new ArrayList<>();
-                ObjectReference node = objField(o, "first");
+                ObjectReference node = (ObjectReference) f[1];
                 while (node != null && items.size() < maxElems) {
-                    items.add(field(node, "item"));
-                    node = objField(node, "next");
+                    Value[] nv = get(node, "item", "next");
+                    items.add(nv[0]);
+                    node = (ObjectReference) nv[1];
                 }
-                writeList(w, o, "list", size, items, depth);
+                writeList(w, o, "list", asInt(f[0]), items, depth);
             }
             case "java.util.ArrayDeque" -> writeDeque(w, o, depth);
             case "java.util.HashSet", "java.util.LinkedHashSet" -> {
-                ObjectReference map = objField(o, "map");
-                List<Value[]> entries = map == null ? List.of() : hashEntries(map);
+                ObjectReference map = (ObjectReference) get(o, "map")[0];
                 List<Value> keys = new ArrayList<>();
-                for (Value[] kv : entries) keys.add(kv[0]);
-                writeList(w, o, "set", map == null ? 0 : intField(map, "size"), keys, depth);
+                int size = 0;
+                if (map != null) {
+                    size = asInt(get(map, "size")[0]);
+                    for (Value[] kv : hashEntries(map)) keys.add(kv[0]);
+                }
+                writeList(w, o, "set", size, keys, depth);
             }
-            case "java.util.HashMap", "java.util.LinkedHashMap" ->
-                writeMap(w, o, intField(o, "size"), hashEntries(o), depth);
+            case "java.util.HashMap", "java.util.LinkedHashMap" -> {
+                int size = asInt(get(o, "size")[0]);
+                writeMap(w, o, size, hashEntries(o), depth);
+            }
             case "java.util.ImmutableCollections$ListN" -> {
-                ArrayReference els = arrayField(o, "elements");
+                ArrayReference els = (ArrayReference) get(o, "elements")[0];
                 int len = els == null ? 0 : els.length();
                 int n = Math.min(len, maxElems);
                 writeList(w, o, "list", len, n == 0 ? List.of() : els.getValues(0, n), depth);
@@ -178,40 +214,47 @@ public final class ValueSerializer {
                 writeList(w, o, "list", items.size(), items, depth);
             }
             case "java.util.ImmutableCollections$SetN" -> {
-                ArrayReference els = arrayField(o, "elements");
+                Value[] f = get(o, "elements", "size");
+                ArrayReference els = (ArrayReference) f[0];
                 List<Value> items = new ArrayList<>();
-                int len = 0;
                 if (els != null) {
-                    for (Value e : els.getValues(0, els.length())) {
-                        if (e == null) continue;
-                        len++;
-                        if (items.size() < maxElems) items.add(e);
+                    int len = els.length();
+                    for (int from = 0; from < len && items.size() < maxElems; from += CHUNK) {
+                        for (Value e : els.getValues(from, Math.min(CHUNK, len - from))) {
+                            if (e != null && items.size() < maxElems) items.add(e);
+                        }
                     }
                 }
-                writeList(w, o, "set", len, items, depth);
+                writeList(w, o, "set", asInt(f[1]), items, depth);
             }
             case "java.util.ImmutableCollections$Set12" -> {
                 List<Value> items = immutablePair(o);
                 writeList(w, o, "set", items.size(), items, depth);
             }
             case "java.util.ImmutableCollections$MapN" -> {
-                ArrayReference table = arrayField(o, "table");
+                Value[] f = get(o, "table", "size");
+                ArrayReference table = (ArrayReference) f[0];
                 List<Value[]> entries = new ArrayList<>();
-                int len = 0;
                 if (table != null) {
-                    List<Value> slots = table.getValues(0, table.length());
-                    for (int k = 0; k + 1 < slots.size(); k += 2) {
-                        if (slots.get(k) == null) continue;
-                        len++;
-                        if (entries.size() < maxElems) entries.add(new Value[] {slots.get(k), slots.get(k + 1)});
+                    int len = table.length();
+                    for (int from = 0; from + 1 < len && entries.size() < maxElems; from += CHUNK) {
+                        List<Value> slots = table.getValues(from, Math.min(CHUNK, len - from));
+                        for (int k = 0; k + 1 < slots.size() && entries.size() < maxElems; k += 2) {
+                            if (slots.get(k) != null) entries.add(new Value[] {slots.get(k), slots.get(k + 1)});
+                        }
                     }
                 }
-                writeMap(w, o, len, entries, depth);
+                writeMap(w, o, asInt(f[1]), entries, depth);
             }
-            case "java.util.ImmutableCollections$Map1" ->
-                writeMap(w, o, 1, List.<Value[]>of(new Value[] {field(o, "k0"), field(o, "v0")}), depth);
-            default -> writePlainObject(w, o, depth);
+            case "java.util.ImmutableCollections$Map1" -> {
+                Value[] f = get(o, "k0", "v0");
+                writeMap(w, o, 1, List.<Value[]>of(new Value[] {f[0], f[1]}), depth);
+            }
+            default -> {
+                return false;
+            }
         }
+        return true;
     }
 
     private void writeList(Json.Writer w, ObjectReference o, String t, int len, List<Value> items, int depth) {
@@ -245,9 +288,10 @@ public final class ValueSerializer {
     }
 
     private void writeDeque(Json.Writer w, ObjectReference o, int depth) {
-        ArrayReference els = arrayField(o, "elements");
-        int head = intField(o, "head");
-        int tail = intField(o, "tail");
+        Value[] f = get(o, "elements", "head", "tail");
+        ArrayReference els = (ArrayReference) f[0];
+        int head = asInt(f[1]);
+        int tail = asInt(f[2]);
         List<Value> items = new ArrayList<>();
         int len = 0;
         if (els != null) {
@@ -255,7 +299,6 @@ public final class ValueSerializer {
             len = tail - head;
             if (len < 0) len += cap;
             int shown = Math.min(len, maxElems);
-            // slots head .. head+shown-1 modulo cap (contiguous, or wrapped in two reads)
             int first = Math.min(shown, cap - head);
             if (first > 0) items.addAll(els.getValues(head, first));
             if (shown > first) items.addAll(els.getValues(0, shown - first));
@@ -265,8 +308,12 @@ public final class ValueSerializer {
 
     private void writePlainObject(Json.Writer w, ObjectReference o, int depth) {
         ReferenceType rt = o.referenceType();
-        List<Field> fields = new ArrayList<>();
-        for (Field f : rt.allFields()) if (!f.isStatic()) fields.add(f);
+        List<Field> fields = instanceFields.computeIfAbsent(rt, t -> {
+            List<Field> out = new ArrayList<>();
+            for (Field f : t.allFields()) if (!f.isStatic()) out.add(f);
+            return out;
+        });
+        java.util.Map<Field, Value> vals = fields.isEmpty() ? java.util.Map.of() : o.getValues(fields);
         w.beginObj()
                 .key("t").str("obj")
                 .key("id").num(o.uniqueID())
@@ -274,7 +321,7 @@ public final class ValueSerializer {
                 .key("fields").beginArr();
         for (Field f : fields) {
             w.beginObj().key("name").str(f.name()).key("value");
-            write(w, o.getValue(f), depth + 1);
+            write(w, vals.get(f), depth + 1);
             w.endObj();
         }
         w.endArr().endObj();
@@ -283,74 +330,96 @@ public final class ValueSerializer {
     // ---- helpers ----
 
     /** Returns the primitive inside a boxed value, or null if o is not a box type. */
-    private static Value unbox(ObjectReference o, String cls) {
+    private Value unbox(ObjectReference o, String cls) {
         switch (cls) {
             case "java.lang.Integer", "java.lang.Long", "java.lang.Double", "java.lang.Float",
                     "java.lang.Short", "java.lang.Byte", "java.lang.Character", "java.lang.Boolean":
-                return field(o, "value");
+                try {
+                    return get(o, "value")[0];
+                } catch (MissingField e) {
+                    return null;
+                }
             default:
                 return null;
         }
     }
 
-    /** Entries of a HashMap/LinkedHashMap as {key, value}, capped at maxElems. */
+    /** Entries of a HashMap/LinkedHashMap as {key, value}, capped at maxElems, reading bounded chunks. */
     private List<Value[]> hashEntries(ObjectReference map) {
         List<Value[]> out = new ArrayList<>();
         if (map.referenceType().name().equals("java.util.LinkedHashMap")) {
             // insertion/access order via the doubly linked list
-            ObjectReference e = objField(map, "head");
+            ObjectReference e = (ObjectReference) get(map, "head")[0];
             while (e != null && out.size() < maxElems) {
-                out.add(new Value[] {field(e, "key"), field(e, "value")});
-                e = objField(e, "after");
+                Value[] nv = get(e, "key", "value", "after");
+                out.add(new Value[] {nv[0], nv[1]});
+                e = (ObjectReference) nv[2];
             }
             return out;
         }
-        ArrayReference table = arrayField(map, "table");
+        ArrayReference table = (ArrayReference) get(map, "table")[0];
         if (table == null) return out;
-        for (Value slot : table.getValues(0, table.length())) {
-            ObjectReference node = (ObjectReference) slot;
-            while (node != null && out.size() < maxElems) {
-                out.add(new Value[] {field(node, "key"), field(node, "value")});
-                node = objField(node, "next");
+        int len = table.length();
+        for (int from = 0; from < len && out.size() < maxElems; from += CHUNK) {
+            for (Value slot : table.getValues(from, Math.min(CHUNK, len - from))) {
+                ObjectReference node = (ObjectReference) slot;
+                while (node != null && out.size() < maxElems) {
+                    Value[] nv = get(node, "key", "value", "next");
+                    out.add(new Value[] {nv[0], nv[1]});
+                    node = (ObjectReference) nv[2];
+                }
+                if (out.size() >= maxElems) break;
             }
-            if (out.size() >= maxElems) break;
         }
         return out;
     }
 
     /** Elements e0/e1 of ImmutableCollections List12/Set12; e1 may be the EMPTY sentinel. */
-    private static List<Value> immutablePair(ObjectReference o) {
+    private List<Value> immutablePair(ObjectReference o) {
+        Value[] f = get(o, "e0", "e1");
         List<Value> items = new ArrayList<>();
-        items.add(field(o, "e0"));
-        Value e1 = field(o, "e1");
-        if (e1 instanceof ObjectReference r && !isEmptySentinel(o, r)) items.add(e1);
-        else if (e1 != null && !(e1 instanceof ObjectReference)) items.add(e1);
+        items.add(f[0]);
+        if (f[1] instanceof ObjectReference r) {
+            if (!r.equals(emptySentinel(o))) items.add(r);
+        } else if (f[1] != null) {
+            items.add(f[1]);
+        }
         return items;
     }
 
-    private static boolean isEmptySentinel(ObjectReference holder, ObjectReference e1) {
-        ReferenceType outer = holder.virtualMachine().classesByName("java.util.ImmutableCollections").stream()
-                .findFirst().orElse(null);
-        if (outer == null) return false;
-        Field empty = outer.fieldByName("EMPTY");
-        return empty != null && e1.equals(outer.getValue(empty));
+    private ObjectReference emptySentinel(ObjectReference holder) {
+        if (!sentinelResolved) {
+            sentinelResolved = true;
+            for (ReferenceType outer : holder.virtualMachine().classesByName("java.util.ImmutableCollections")) {
+                Field empty = outer.fieldByName("EMPTY");
+                if (empty != null && outer.getValue(empty) instanceof ObjectReference r) emptySentinel = r;
+            }
+        }
+        return emptySentinel;
     }
 
-    private static Value field(ObjectReference o, String name) {
-        Field f = o.referenceType().fieldByName(name);
-        if (f == null) throw new IllegalStateException(o.referenceType().name() + " has no field " + name);
-        return o.getValue(f);
+    /** Reads the named fields in one JDWP round trip; field lookups are cached per type. */
+    private Value[] get(ObjectReference o, String... names) {
+        ReferenceType rt = o.referenceType();
+        java.util.Map<String, Field> byName = fieldsByName.computeIfAbsent(rt, t -> {
+            java.util.Map<String, Field> m = new java.util.HashMap<>();
+            for (Field f : t.allFields()) m.putIfAbsent(f.name(), f);
+            return m;
+        });
+        List<Field> fs = new ArrayList<>(names.length);
+        for (String n : names) {
+            Field f = byName.get(n);
+            if (f == null) throw new MissingField(rt.name() + " has no field " + n);
+            fs.add(f);
+        }
+        java.util.Map<Field, Value> vals = o.getValues(fs);
+        Value[] out = new Value[names.length];
+        for (int k = 0; k < out.length; k++) out[k] = vals.get(fs.get(k));
+        return out;
     }
 
-    private static int intField(ObjectReference o, String name) {
-        return ((IntegerValue) field(o, name)).value();
-    }
-
-    private static ObjectReference objField(ObjectReference o, String name) {
-        return (ObjectReference) field(o, name);
-    }
-
-    private static ArrayReference arrayField(ObjectReference o, String name) {
-        return (ArrayReference) field(o, name);
+    private static int asInt(Value v) {
+        if (v instanceof IntegerValue i) return i.value();
+        throw new MissingField("expected int field");
     }
 }

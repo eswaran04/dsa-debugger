@@ -23,6 +23,8 @@ public class ValuesProbe {
         List<Integer> im1 = List.of(9);
         Map<String, Integer> imMap1 = Map.of("a", 1);
         Set<Integer> imSet = Set.of(5);
+        double inf = Double.POSITIVE_INFINITY;
+        float nan = Float.NaN;
         int stop = 0;
     }
 }

@@ -114,6 +114,9 @@ class ValueSerializerTest {
             assertEquals(1L, ser(vs, f, "imMap1").get("len"));
             assertEquals("set", ser(vs, f, "imSet").get("t"));
 
+            assertEquals("Infinity", ser(vs, f, "inf").get("v"));
+            assertEquals("NaN", ser(vs, f, "nan").get("v"));
+
             // depth cut-off: ll's inner lists are depth 1; with maxDepth 0 they become refs
             Map<String, Object> shallow = ser(new ValueSerializer(1000, 0), f, "ll");
             assertEquals("ref", map(list(shallow.get("v")).get(0)).get("t"));
