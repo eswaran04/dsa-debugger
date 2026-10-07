@@ -1,0 +1,8 @@
+{
+  "name": "tracer",
+  "private": true,
+  "scripts": {
+    "build": "./build.sh",
+    "test": "./test.sh"
+  }
+}
