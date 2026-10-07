@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0d14;
+  --color-panel: #10151f;
+  --color-line: #1e2635;
+  --color-fg: #dbe3f0;
+  --color-muted: #7d8aa3;
+  --color-accent: #60a5fa;
+  --font-sans: var(--font-sans), ui-sans-serif, system-ui;
+  --font-mono: var(--font-mono), ui-monospace, monospace;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+}
+
+.panel {
+  background: var(--color-panel);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-title {
+  @apply border-b border-line px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted;
+}
+
+.field {
+  @apply flex items-center gap-2 text-xs text-muted;
+}
+.field select {
+  @apply max-w-72 rounded-md border border-line bg-black/30 px-2 py-1 text-sm text-fg outline-none focus:border-accent/60;
+}
+
+.btn {
+  @apply inline-flex items-center gap-1.5 rounded-md border border-line bg-white/5 px-3 py-1.5 text-sm font-medium transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50;
+}
+.btn-primary {
+  @apply border-accent/50 bg-accent/90 text-slate-950 hover:bg-accent;
+}
+.icon-btn {
+  @apply grid h-7 w-7 place-items-center rounded text-fg/80 transition hover:bg-white/10 hover:text-fg disabled:cursor-not-allowed disabled:opacity-30;
+}
+
+.timeline {
+  accent-color: var(--color-accent);
+}
+
+/* Monaco line decorations */
+.dbg-current-line {
+  background: rgba(250, 204, 21, 0.16);
+  box-shadow: inset 3px 0 0 #facc15;
+}
+.dbg-frame-line {
+  background: rgba(52, 211, 153, 0.08);
+}
+.dbg-exception-line {
+  background: rgba(248, 113, 113, 0.2);
+  box-shadow: inset 3px 0 0 #f87171;
+}
+.dbg-breakpoint {
+  background: radial-gradient(circle, #ef4444 0 5px, transparent 6px);
+  cursor: pointer;
+}
+
+@keyframes var-flash {
+  from {
+    background: rgba(250, 204, 21, 0.3);
+  }
+  to {
+    background: transparent;
+  }
+}
+.var-changed {
+  animation: var-flash 0.6s ease-out;
+  background: rgba(250, 204, 21, 0.08);
+}
