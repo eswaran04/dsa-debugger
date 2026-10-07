@@ -67,9 +67,13 @@ public final class Harness {
         try {
             target.invoke(instance, values);
         } catch (InvocationTargetException e) {
+            System.out.flush();
             e.getCause().printStackTrace();
             System.exit(1);
         }
+        // exit explicitly so non-daemon threads started by user code cannot keep the VM alive
+        System.out.flush();
+        System.exit(0);
     }
 
     private static void argError(String msg) {
