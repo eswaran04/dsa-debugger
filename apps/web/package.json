@@ -33,7 +33,7 @@
     "eslint": "^9",
     "eslint-config-next": "15.5.27",
     "@eslint/eslintrc": "^3",
-    "vitest": "^3",
+    "vitest": "^4",
     "@playwright/test": "^1.49.0"
   }
 }
