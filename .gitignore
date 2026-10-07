@@ -1,1 +1,8 @@
 .superpowers/
+node_modules
+.next
+build
+packages/tracer/lib/
+.env*
+test-results
+playwright-report
