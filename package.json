@@ -4,8 +4,9 @@
   "private": true,
   "packageManager": "pnpm@9.15.9",
   "scripts": {
-    "build": "pnpm -r build",
-    "test": "pnpm -r test",
-    "dev": "pnpm -r --parallel dev"
+    "dev": "pnpm -F tracer build && pnpm -F web dev",
+    "start": "pnpm -F tracer build && pnpm -F web build && pnpm -F web start",
+    "build": "pnpm -F tracer build && pnpm -F web build",
+    "test": "pnpm -F tracer test && pnpm -F web test"
   }
 }
