@@ -1,13 +1,45 @@
 package dev.dsadebug.tracer;
 
 import dev.dsadebug.json.Json;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Renders a TraceModel as the shared Trace JSON. Steps are written one at a time. */
 final class TraceWriter {
     private TraceWriter() {}
 
-    /** The limits are unused for now; the trace byte cap (maxTraceBytes) is applied here later. */
+    /** Slack for fields whose length depends on what is kept (stats.steps digits, truncated flag). */
+    private static final int SLACK = 32;
+
+    /**
+     * Writes the trace within limits.maxTraceBytes(): trailing steps are dropped until it fits, and
+     * stats.truncated is set. The status is never changed.
+     */
     static String write(TraceModel m, Job.Limits limits) {
+        List<String> steps = new ArrayList<>(m.steps.size());
+        for (TraceModel.Step s : m.steps) {
+            Json.Writer w = new Json.Writer();
+            writeStep(w, s);
+            steps.add(w.toString());
+        }
+        boolean wasTruncated = m.truncated;
+        m.truncated = true; // measure the header with its longest flag value
+        long budget = (long) limits.maxTraceBytes() - render(m, List.of()).size() - SLACK;
+        m.truncated = wasTruncated;
+        int keep = 0;
+        long used = 0;
+        for (String s : steps) {
+            long n = s.getBytes(StandardCharsets.UTF_8).length + 1L; // + comma
+            if (used + n > budget) break;
+            used += n;
+            keep++;
+        }
+        if (keep < steps.size()) m.truncated = true;
+        return render(m, steps.subList(0, keep)).toString();
+    }
+
+    private static Json.Writer render(TraceModel m, List<String> steps) {
         Json.Writer w = new Json.Writer();
         w.beginObj().key("status").str(m.status);
         if (m.compileErrors != null) {
@@ -28,7 +60,7 @@ final class TraceWriter {
             w.endArr().endObj();
         }
         w.key("steps").beginArr();
-        for (TraceModel.Step s : m.steps) writeStep(w, s);
+        for (String step : steps) w.raw(step);
         w.endArr();
         if (m.resultJson != null) w.key("result").raw(m.resultJson);
         if (m.finalArgs != null) {
@@ -46,11 +78,11 @@ final class TraceWriter {
         if (m.error != null) w.key("error").str(m.error);
         w.key("stdout").str(m.stdout);
         w.key("stats").beginObj()
-                .key("steps").num(m.steps.size())
+                .key("steps").num(steps.size())
                 .key("ms").num(m.ms)
                 .key("truncated").bool(m.truncated)
                 .endObj();
-        return w.endObj().toString();
+        return w.endObj();
     }
 
     static void writeStep(Json.Writer w, TraceModel.Step s) {

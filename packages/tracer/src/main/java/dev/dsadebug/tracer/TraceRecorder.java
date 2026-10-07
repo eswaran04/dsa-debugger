@@ -53,6 +53,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -180,6 +182,8 @@ public final class TraceRecorder {
         /** Set by an exception: user frames may have been popped without MethodExit events. */
         private boolean unwindPending;
         private PendingException pending;
+        /** step_limit or timeout once recording was cut short; the exit code is then irrelevant. */
+        private volatile String stopStatus;
 
         private record PendingException(String type, String message, int line, int depth, String stackJson) {}
 
@@ -202,6 +206,15 @@ public final class TraceRecorder {
                 throw new IllegalStateException("could not launch the debuggee: " + e.getMessage(), e);
             }
             Process p = vm.process();
+            ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "dsatrace-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
+            watchdog.schedule(() -> {
+                stop("timeout");
+                p.destroyForcibly();
+            }, job.limits().wallMs(), TimeUnit.MILLISECONDS);
             try {
                 out = new OutputPump(p.getInputStream(), job.limits().maxStdoutBytes(), "\n[output truncated]");
                 err = new OutputPump(p.getErrorStream(), STDERR_CAP, null);
@@ -217,6 +230,7 @@ public final class TraceRecorder {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException(e);
             } finally {
+                watchdog.shutdownNow();
                 if (out != null) out.close();
                 if (err != null) err.close();
                 if (p.isAlive()) {
@@ -227,6 +241,17 @@ public final class TraceRecorder {
                         Thread.currentThread().interrupt();
                     }
                 }
+            }
+        }
+
+        /** Ends the run early: the first reason wins, and the VM is killed so the event loop drains out. */
+        private void stop(String status) {
+            if (stopStatus == null) stopStatus = status;
+            done = true;
+            try {
+                vm.exit(0);
+            } catch (VMDisconnectedException ignored) {
+                // already gone
             }
         }
 
@@ -348,27 +373,45 @@ public final class TraceRecorder {
         }
 
         private void recordLine(ThreadReference t) throws IncompatibleThreadStateException {
-            List<StackFrame> uf = userFrames(t);
-            reconcile(uf.size());
-            addStep(new TraceModel.Step("line", uf.get(0).location().lineNumber(), uf.size(), stackJson(uf), null, null));
+            List<StackFrame> uf = topUserFrames(t);
+            addStep(new TraceModel.Step("line", uf.get(0).location().lineNumber(), fids.size(), stackJson(uf), null, null));
         }
 
         private void addStep(TraceModel.Step s) {
             s.stdout = out.takeNew();
             m.steps.add(s);
+            if (m.steps.size() >= job.limits().maxSteps()) stop("step_limit");
+        }
+
+        /**
+         * The top MAX_STACK user frames, with fids aligned. Depth is tracked by method entry/exit
+         * events (fids.size()), so deep recursion costs a bounded frame fetch per step; only after an
+         * exception (frames popped without exit events) is the whole stack scanned.
+         */
+        private List<StackFrame> topUserFrames(ThreadReference t) throws IncompatibleThreadStateException {
+            if (!unwindPending && !fids.isEmpty()) {
+                List<StackFrame> uf = new ArrayList<>();
+                for (StackFrame f : t.frames(0, Math.min(t.frameCount(), MAX_STACK * 2))) {
+                    if (userClasses.contains(f.location().declaringType().name())) uf.add(f);
+                }
+                if (uf.size() <= fids.size()) return uf.size() > MAX_STACK ? uf.subList(0, MAX_STACK) : uf;
+            }
+            List<StackFrame> all = userFrames(t);
+            reconcile(all.size());
+            unwindPending = false;
+            return all.size() > MAX_STACK ? all.subList(0, MAX_STACK) : all;
         }
 
         private void onExit(MethodExitEvent mx) throws IncompatibleThreadStateException {
             ThreadReference t = mx.thread();
             boolean isEntry = mx.method().equals(entryMethod) && t.frameCount() == entryFrameCount;
             if (job.record()) {
-                List<StackFrame> uf = userFrames(t);
-                reconcile(uf.size());
-                addStep(new TraceModel.Step("return", mx.location().lineNumber(), uf.size(), stackJson(uf),
+                List<StackFrame> uf = topUserFrames(t);
+                addStep(new TraceModel.Step("return", mx.location().lineNumber(), fids.size(), stackJson(uf),
                         mx.method().name(), valueJson(mx.returnValue())));
                 fids.poll();
             }
-            if (!isEntry) return;
+            if (!isEntry || stopStatus != null) return;
             m.resultJson = valueJson(mx.returnValue());
             List<Value> args = t.frame(0).getArgumentValues();
             m.finalArgs = new ArrayList<>();
@@ -402,7 +445,9 @@ public final class TraceRecorder {
 
         /** Applies the debuggee's exit code once it is gone. Harness: 0 ok, 1 user exception, 3 arg error. */
         private void finish(int exit) {
-            if (exit == 1 && pending != null && m.resultJson == null) {
+            if (stopStatus != null) {
+                m.status = stopStatus;
+            } else if (exit == 1 && pending != null && m.resultJson == null) {
                 if (job.record()) {
                     m.steps.add(new TraceModel.Step("exception", pending.line(), pending.depth(), pending.stackJson(),
                             null, null));
