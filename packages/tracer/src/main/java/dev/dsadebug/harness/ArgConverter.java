@@ -1,10 +1,19 @@
 package dev.dsadebug.harness;
 
 import dev.dsadebug.json.Json;
+import java.lang.reflect.Array;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Queue;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 /** Converts JSON text into Java values for the supported solution argument types. */
 public final class ArgConverter {
@@ -21,16 +30,20 @@ public final class ArgConverter {
     }
 
     private static Object fromJson(Object v, Type type) {
-        if (type instanceof ParameterizedType) {
-            ParameterizedType pt = (ParameterizedType) type;
-            if (pt.getRawType() == List.class) {
-                if (!(v instanceof List)) throw mismatch(type, v);
-                Type elem = pt.getActualTypeArguments()[0];
-                List<Object> out = new ArrayList<>();
-                for (Object o : (List<?>) v) out.add(fromJson(o, elem));
-                return out;
-            }
-            throw new IllegalArgumentException("unsupported type " + type.getTypeName());
+        if (v == null && !(type instanceof Class<?> c && c.isPrimitive())) return null;
+        if (type instanceof ParameterizedType pt && pt.getRawType() instanceof Class<?> raw
+                && Collection.class.isAssignableFrom(raw)) {
+            Type elem = pt.getActualTypeArguments()[0];
+            Collection<Object> out = newCollection(raw, type);
+            for (Object o : asList(v, type)) out.add(fromJson(o, elem));
+            return out;
+        }
+        if (type instanceof Class<?> c && c.isArray()) {
+            List<?> l = asList(v, type);
+            Class<?> comp = c.getComponentType();
+            Object a = Array.newInstance(comp, l.size());
+            for (int i = 0; i < l.size(); i++) Array.set(a, i, fromJson(l.get(i), comp));
+            return a;
         }
         if (type == int.class || type == Integer.class) return toInt(v, type);
         if (type == long.class || type == Long.class) {
@@ -40,6 +53,11 @@ public final class ArgConverter {
         if (type == double.class || type == Double.class) {
             if (v instanceof Long) return ((Long) v).doubleValue();
             if (v instanceof Double) return v;
+            throw mismatch(type, v);
+        }
+        if (type == float.class || type == Float.class) {
+            if (v instanceof Long) return ((Long) v).floatValue();
+            if (v instanceof Double) return ((Double) v).floatValue();
             throw mismatch(type, v);
         }
         if (type == boolean.class || type == Boolean.class) {
@@ -54,34 +72,23 @@ public final class ArgConverter {
             if (v instanceof String) return v;
             throw mismatch(type, v);
         }
-        if (type == int[].class) {
-            List<?> l = asList(v, type);
-            int[] a = new int[l.size()];
-            for (int i = 0; i < a.length; i++) a[i] = toInt(l.get(i), int.class);
-            return a;
-        }
-        if (type == int[][].class) {
-            List<?> l = asList(v, type);
-            int[][] a = new int[l.size()][];
-            for (int i = 0; i < a.length; i++) a[i] = (int[]) fromJson(l.get(i), int[].class);
-            return a;
-        }
-        if (type == char[][].class) {
-            List<?> l = asList(v, type);
-            char[][] a = new char[l.size()][];
-            for (int i = 0; i < a.length; i++) {
-                List<?> row = asList(l.get(i), type);
-                a[i] = new char[row.size()];
-                for (int j = 0; j < a[i].length; j++) a[i][j] = (Character) fromJson(row.get(j), char.class);
+        throw new IllegalArgumentException("unsupported type " + type.getTypeName());
+    }
+
+    /** A mutable instance for a declared collection type: interfaces map to the usual implementation. */
+    @SuppressWarnings("unchecked")
+    private static Collection<Object> newCollection(Class<?> raw, Type type) {
+        if (!raw.isInterface() && !Modifier.isAbstract(raw.getModifiers())) {
+            try {
+                return (Collection<Object>) raw.getConstructor().newInstance();
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalArgumentException("unsupported type " + type.getTypeName(), e);
             }
-            return a;
         }
-        if (type == String[].class) {
-            List<?> l = asList(v, type);
-            String[] a = new String[l.size()];
-            for (int i = 0; i < a.length; i++) a[i] = (String) fromJson(l.get(i), String.class);
-            return a;
-        }
+        if (SortedSet.class.isAssignableFrom(raw)) return new TreeSet<>();
+        if (Set.class.isAssignableFrom(raw)) return new LinkedHashSet<>();
+        if (Queue.class.isAssignableFrom(raw)) return new ArrayDeque<>();
+        if (raw.isAssignableFrom(ArrayList.class)) return new ArrayList<>(); // List, Collection, Iterable
         throw new IllegalArgumentException("unsupported type " + type.getTypeName());
     }
 

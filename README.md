@@ -36,7 +36,7 @@ To set a breakpoint, click the gutter. Drag the timeline to jump to any step. **
 
 The entry method is picked by matching your argument names to its parameter names. You can also choose it from the **Method** dropdown.
 
-**Supported input types:** `int long double boolean char String int[] int[][] char[][] String[] List<Integer> List<List<Integer>> List<String>`
+**Supported input types:** primitives and their boxes (`int long double float boolean char`), `String`, arrays of any of these at any depth (`int[]`, `long[][]`, `String[]`, `Integer[]`…), and collections of any of these, nested (`List<Integer>`, `ArrayList<Integer>`, `LinkedList<String>`, `Set<Integer>`, `Deque<Integer>`, `PriorityQueue<Integer>`, `List<List<Integer>>`…). Interfaces map to `ArrayList`, `LinkedHashSet`, `TreeSet` (sorted sets) or `ArrayDeque` (queues). `null` is allowed for non-primitive values.
 
 **Limits:** a run stops after 5000 steps, which usually means an infinite loop, or after 10 s. You can still replay what ran.
 
